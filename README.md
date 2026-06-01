@@ -2,7 +2,7 @@
 
 A proof-of-concept RGB-D screening pipeline for school-based scoliosis screening support. The system captures posture during standardised tasks, extracts surface-based geometric features, and produces interpretable screening indicators to assist existing workflows.
 
-> **Non-diagnostic:** All outputs are posture-based screening proxies. They do not represent clinical diagnosis, Cobb angle measurement, or medical-grade assessment. Clinician oversight is required for all referral decisions.
+All outputs are posture-based screening proxies and do not represent clinical diagnosis, Cobb angle measurement, or medical-grade assessment. Clinician oversight is required for all referral decisions.
 
 ---
 
@@ -13,8 +13,7 @@ Kidzonia Project/
 ├── src/
 │   ├── Data Collection/
 │   │   ├── quest_recording_auto.py       # Live RGB-D capture (primary)
-│   │   ├── quest_recording_manual.py     # Manual capture variant (legacy)
-│   │   └── spine_angle_detection_image.py# Static image capture
+│   │   ├── spine_angle_detection_image.py# Static image capture
 │   ├── Data Processing/
 │   │   ├── aggregate_all_trials.py       # Frame-level CSV → trial-level dataset
 │   │   ├── aggregate_all_subjects.py     # Legacy subject-level aggregation
@@ -26,9 +25,12 @@ Kidzonia Project/
 │   ├── frame_feature_schema_v1.json      # Per-frame feature contract
 │   ├── trial_feature_schema_v1.json      # Per-trial aggregated feature contract
 │   └── label_schema_v1.json              # Risk label definition
-├── raw_data/                             # Live capture output (auto-created)
-├── processed_data/                       # Generated trial datasets and CSV artifacts
-├── external_datasets/                    # Sourced online datasets and external resources
+├── Data/
+│   ├── Raw/
+│   │   ├── raw_data/                     # Live capture output (auto-created)
+│   │   └── spine_image_dataset/          # Static image capture output (auto-created)
+│   └── Processed/                        # Generated trial datasets and CSV artifacts
+├── public_datasets/                      # Sourced online datasets (for model training only, not screening data)
 ├── models/                               # Trained model files (auto-created)
 ├── example_trial_row.json                # Example row for schema validation
 └── environment.yml                       # Conda environment spec
@@ -38,11 +40,10 @@ Kidzonia Project/
 
 ## Environment Setup
 
-Requires **Python 3.12** and Conda.
+Requires **Python 3.12** and Conda. See `environment.yml`.
 
 ```bash
-conda env create -f environment.yml
-conda activate kidzonia
+conda activate env
 ```
 
 Key dependencies: `openni`, `mediapipe`, `opencv`, `pandas`, `scikit-learn`, `numpy`, `scipy`.
@@ -67,7 +68,7 @@ Run a guided screening session for one subject. The system captures three standa
 python "src/Data Collection/quest_recording_auto.py"
 ```
 
-Output is saved to `raw_data/{subject_id}/{quest_id}/trial_{n}/`:
+Output is saved to `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_{n}/`:
 - `video.avi` — raw RGB video
 - `features.csv` — frame-level features (one row per frame)
 - `features.json` — same data in JSON format
@@ -80,10 +81,10 @@ Output is saved to `raw_data/{subject_id}/{quest_id}/trial_{n}/`:
 Aggregates frame-level CSVs into one row per trial using robust statistics (median and 95th percentile).
 
 ```bash
-python "src/Data Processing/aggregate_all_trials.py" raw_data/ processed_data/trial_dataset.csv
+python "src/Data Processing/aggregate_all_trials.py"
 ```
 
-Output: `processed_data/trial_dataset.csv` — one row per trial across all subjects and quests.
+Output: `Data/Processed/aggregated_trials.csv` — one row per trial across all subjects and quests. Override paths with `python aggregate_all_trials.py <input_root> <output_csv>`.
 
 ---
 
@@ -92,8 +93,10 @@ Output: `processed_data/trial_dataset.csv` — one row per trial across all subj
 Applies an ATR-based risk label to each trial row. Trials with `atr_proxy_p95_deg >= 5.0` are flagged as `risk_label = 1`.
 
 ```bash
-python "src/Data Processing/add_labels.py" processed_data/trial_dataset.csv processed_data/trial_dataset_labeled.csv
+python "src/Data Processing/add_labels.py"
 ```
+
+Input: `Data/Processed/aggregated_trials.csv` → Output: `Data/Processed/labeled_trials.csv`. Override with explicit paths if needed.
 
 ---
 
@@ -102,7 +105,7 @@ python "src/Data Processing/add_labels.py" processed_data/trial_dataset.csv proc
 Trains a logistic regression baseline classifier with feature scaling and cross-validation.
 
 ```bash
-python "src/ML Modelling/train_baseline.py" processed_data/trial_dataset_labeled.csv models/baseline_logreg.pkl
+python "src/ML Modelling/train_baseline.py" "Data/Processed/labeled_trials.csv" models/baseline_logreg.pkl
 ```
 
 Prints cross-validated ROC-AUC, test classification report, and saves the fitted pipeline (scaler + classifier) to `models/`.
@@ -138,7 +141,7 @@ The data processing stages (Steps 2–4) only read CSV files and run without any
 1. Place downloaded images under a folder organised by subject and posture type.
 2. Run MediaPipe pose estimation on each image (no OpenNI required).
 3. Compute the same features as `quest_recording_auto.py` using the landmark coordinates.
-4. Write one `features.csv` per trial into `raw_data/{subject_id}/{quest_id}/trial_001/`.
+4. Write one `features.csv` per trial into `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_001/`.
 5. Run aggregation, labeling, and training as normal from Stage 2 onward.
 
 **Limitations with image-only datasets:**
@@ -185,6 +188,16 @@ Aggregated from frame-level using median and 95th percentile. One row per trial 
 - **False detections**: No subject-presence validation before feature extraction.
 - **2D-only features**: All angular features are image-plane projections. Depth is captured but not fully integrated into calibrated 3D measurements.
 - **No inference script**: The trained model cannot yet be applied to new recordings without additional code.
+
+---
+
+## External Datasets
+
+| Dataset | Source | Use in this project |
+|---|---|---|
+| Posture Keypoints Detection | [Kaggle — melsmm](https://www.kaggle.com/datasets/melsmm/posture-keypoints-detection) | Fine-tuning the spine keypoint detector (YOLO pose format, 4 spine landmarks). Not used as screening data. |
+
+Stored under `public_datasets/posture/`. Raw files are not modified.
 
 ---
 
