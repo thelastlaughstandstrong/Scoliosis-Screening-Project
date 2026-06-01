@@ -1,0 +1,28 @@
+{
+  "identifiers": {
+    "subject_id": "S001",
+    "quest_id": "Q2_forward_bend",
+    "trial_id": "trial_001"
+  },
+  "pose_quality": {
+    "num_frames": 150,
+    "pose_coverage_ratio": 0.92
+  },
+  "standing_symmetry_features": {
+    "standing_symmetry_median": null,
+    "standing_midline_offset_p95_px": null
+  },
+  "forward_bend_features": {
+    "trunk_curvature_p95_deg": 6.4,
+    "atr_proxy_p95_deg": 6.4,
+    "rib_hump_proxy_p95_px": 12.3
+  },
+  "global_trunk_features": {
+    "trunk_inclination_2d_median_deg": 42.1,
+    "trunk_inclination_2d_p95_deg": 48.7
+  },
+  "timestamps": {
+    "timestamp_start": 1700000000.0,
+    "timestamp_end": 1700000005.0
+  }
+}

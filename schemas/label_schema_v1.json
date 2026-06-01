@@ -1,0 +1,7 @@
+{
+  "label_name": "risk_label",
+  "rules": {
+    "atr_proxy_deg_max >= 5": 1,
+    "otherwise": 0
+  }
+}

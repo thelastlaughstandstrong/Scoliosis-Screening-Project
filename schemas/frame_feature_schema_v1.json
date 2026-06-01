@@ -1,0 +1,131 @@
+{
+  "schema_name": "kidzonia_frame_features_v1",
+  "schema_version": "1.0",
+  "unit_of_analysis": "frame",
+  "description": "Frame-level posture and trunk geometry proxy features for school-based scoliosis screening. Non-diagnostic.",
+
+  "identifiers": {
+    "subject_id": {
+      "type": "string",
+      "description": "Anonymous student identifier"
+    },
+    "quest_id": {
+      "type": "categorical",
+      "values": ["Q1_standing", "Q2_forward_bend", "Q3_upward_stretch"],
+      "description": "Screening posture / task identifier"
+    },
+    "trial_id": {
+      "type": "string",
+      "description": "Trial index within subject and quest"
+    }
+  },
+
+  "timestamps": {
+    "timestamp_epoch": {
+      "type": "float",
+      "unit": "seconds",
+      "description": "Unix timestamp at frame capture"
+    },
+    "t_rel_s": {
+      "type": "float",
+      "unit": "seconds",
+      "description": "Time since start of trial"
+    }
+  },
+
+  "pose_quality": {
+    "pose_present": {
+      "type": "boolean",
+      "description": "Whether pose landmarks were detected"
+    },
+    "pose_confidence": {
+      "type": "float",
+      "range": [0, 1],
+      "description": "Binary proxy confidence for pose detection (1.0 if pose detected, else 0.0)"
+    }
+  },
+
+  "standing_symmetry_features": {
+    "delta_shoulder_height_px": {
+      "type": "float",
+      "unit": "pixels",
+      "min": 0,
+      "description": "Vertical asymmetry between shoulders (Q1)"
+    },
+    "delta_hip_height_px": {
+      "type": "float",
+      "unit": "pixels",
+      "min": 0,
+      "description": "Vertical asymmetry between hips (Q1)"
+    },
+    "standing_midline_x_offset_px": {
+      "type": "float",
+      "unit": "pixels",
+      "min": 0,
+      "description": "Horizontal offset between shoulder and hip midlines (Q1, Q3)"
+    },
+    "standing_symmetry_index": {
+      "type": "float",
+      "range": [0, 1],
+      "description": "Normalized composite symmetry proxy (Q1)"
+    }
+  },
+
+  "forward_bend_features": {
+    "rib_hump_proxy_px": {
+      "type": ["float", "null"],
+      "unit": "sensor depth units (relative, uncalibrated)",
+      "min": 0,
+      "description": "Depth-based surface asymmetry proxy (Q2)"
+    },
+    "surface_asymmetry_score": {
+      "type": ["float", "null"],
+      "min": 0,
+      "description": "2D curvature-based surface asymmetry proxy (Q2)"
+    },
+    "atr_proxy_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "min": 0,
+      "description": "Angle-of-trunk-rotation proxy derived from 2D curvature (Q2)"
+    },
+    "atr_exceeds_5deg": {
+      "type": ["integer", "null"],
+      "values": [0, 1],
+      "description": "Binary screening flag based on ATR proxy threshold (Q2)"
+    }
+  },
+
+  "trunk_geometry_features": {
+    "trunk_inclination_2d_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "description": "Global trunk inclination in image plane (Q1–Q3)"
+    },
+    "trunk_inclination_3d_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "description": "Approximate 3D trunk inclination using depth (Q2)"
+    },
+    "trunk_segment_angle_upper_2d_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "description": "Upper trunk inclination (shoulders to mid-torso, Q2)"
+    },
+    "trunk_segment_angle_lower_2d_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "description": "Lower trunk inclination (mid-torso to hips, Q2)"
+    },
+    "trunk_curvature_proxy_2d_deg": {
+      "type": ["float", "null"],
+      "unit": "degrees",
+      "min": 0,
+      "description": "Absolute angular difference between trunk segments (Q2)"
+    }
+  },
+
+  "notes": {
+    "diagnostic_disclaimer": "All features are non-diagnostic screening proxies and do not represent Cobb angle or clinical diagnosis."
+  }
+}

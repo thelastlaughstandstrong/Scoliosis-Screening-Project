@@ -1,0 +1,42 @@
+name: env
+channels:
+  - conda-forge
+dependencies:
+  # Core runtime 
+  - python=3.12 #necessary for OpenNI compatability
+  - pip
+
+  # Core scientific stack (conda binaries = fewer install failures)
+  - numpy>=1.26,<2.0
+  - scipy>=1.11,<1.14
+  - pandas>=2.1,<2.3
+  - scikit-learn>=1.4
+  - matplotlib>=3.8
+
+  # Computer vision
+  - opencv>=4.8,<4.13
+
+  # Jupyter + VS Code integration
+  - jupyterlab>=4.0,<4.4
+  - ipykernel>=6.25,<6.30
+
+  # Engineering / production hygiene
+  - pyyaml>=6.0,<7
+  - requests>=2.31,<3
+  - tqdm>=4.66,<5
+
+  # QA / reproducibility
+  - pytest>=7.4,<9
+  - mypy>=1.7,<2
+  - ruff>=0.5,<1
+  - black>=24.0,<25
+  - pre-commit>=3.6,<4
+
+  # Pip-only deps (keep minimal)
+  - pip:
+      # Depth camera python binding (requires separate OpenNI2 runtime installed on Windows)
+      - openni==2.3.0
+      - python-dotenv>=1.0,<2
+      - pydantic>=2.6,<3
+      - mediapipe==0.10.21
+

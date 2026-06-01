@@ -1,0 +1,94 @@
+{
+  "schema_name": "kidzonia_trial_features_v1_1",
+  "schema_version": "1.1",
+  "unit_of_analysis": "student_quest_trial",
+  "description": "Aggregated posture and trunk geometry screening features derived from per-frame pose estimates for school-based scoliosis risk screening. Features are non-diagnostic and image-based proxies.",
+
+  "identifiers": {
+    "subject_id": {
+      "type": "string",
+      "description": "Anonymized student identifier"
+    },
+    "quest_id": {
+      "type": "categorical",
+      "values": ["Q1_standing", "Q2_forward_bend", "Q3_upward_stretch"],
+      "description": "Standardized posture task identifier"
+    },
+    "trial_id": {
+      "type": "string",
+      "description": "Unique trial identifier within a subject and quest"
+    }
+  },
+
+  "pose_quality": {
+    "num_frames": {
+      "type": "integer",
+      "min": 1,
+      "description": "Total number of recorded frames in the trial"
+    },
+    "pose_coverage_ratio": {
+      "type": "float",
+      "range": [0, 1],
+      "description": "Fraction of frames with valid pose detection (pose_present == true)"
+    }
+  },
+
+  "standing_symmetry_features": {
+    "standing_symmetry_median": {
+      "type": ["float", "null"],
+      "range": [0, 1],
+      "description": "Median standing symmetry index computed per trial from Q1_standing frames"
+    },
+    "standing_midline_offset_p95_px": {
+      "type": ["float", "null"],
+      "min": 0,
+      "description": "95th percentile horizontal trunk midline offset (in pixels), computed per quest for Q1_standing or Q3_upward_stretch"
+    }
+  },
+
+  "forward_bend_features": {
+    "trunk_curvature_p95_deg": {
+      "type": ["float", "null"],
+      "min": 0,
+      "description": "95th percentile 2D trunk curvature proxy derived from upper–lower trunk segment angle difference during Q2_forward_bend"
+    },
+    "atr_proxy_p95_deg": {
+      "type": ["float", "null"],
+      "min": 0,
+      "description": "95th percentile angle-of-trunk-rotation (ATR) proxy derived from 2D trunk curvature during Q2_forward_bend"
+    },
+    "rib_hump_proxy_p95_px": {
+      "type": ["float", "null"],
+      "min": 0,
+      "description": "95th percentile depth-based rib hump proxy (in millimeters or pixels, sensor-dependent) during Q2_forward_bend"
+    }
+  },
+
+  "global_trunk_features": {
+    "trunk_inclination_2d_median_deg": {
+      "type": ["float", "null"],
+      "description": "Median 2D global trunk inclination angle (image-plane based) aggregated across all quests in the trial"
+    },
+    "trunk_inclination_2d_p95_deg": {
+      "type": ["float", "null"],
+      "description": "95th percentile 2D global trunk inclination angle (image-plane based) aggregated across all quests in the trial"
+    }
+  },
+
+  "timestamps": {
+    "timestamp_start": {
+      "type": "float",
+      "description": "Epoch timestamp of the first recorded frame in the trial"
+    },
+    "timestamp_end": {
+      "type": "float",
+      "description": "Epoch timestamp of the last recorded frame in the trial"
+    }
+  },
+
+  "notes": {
+    "diagnostic_disclaimer": "All features are screening proxies derived from 2D pose and depth cues. They do not represent clinical diagnosis, Cobb angle measurement, or medical-grade assessment.",
+    "aggregation_note": "All scalar features are computed by aggregating per-frame values within a trial using robust statistics (median or 95th percentile).",
+    "dimensionality_note": "All angular features are image-based (2D). Depth information, where used, serves only as a relative asymmetry cue."
+  }
+}
