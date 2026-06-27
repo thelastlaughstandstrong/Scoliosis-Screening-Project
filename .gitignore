@@ -1,0 +1,47 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ── Environments ────────────────────────────────────────
+.env
+.venv
+env/
+venv/
+
+# ── Jupyter ─────────────────────────────────────────────
+.ipynb_checkpoints/
+notebooks/.ipynb_checkpoints/
+
+# ── Data — raw captures (large, device-specific) ────────
+Data/Raw/
+Data/Processed/
+
+# Allow sample data committed for demonstration
+!Data/samples/
+
+# ── Models — trained weights (large binaries) ────────────
+models/*
+!models/.gitkeep
+
+# ── Downloaded YOLO base weights ─────────────────────────
+yolov8n-pose.pt
+yolov8*.pt
+
+# ── Public dataset — extracted images (large) ────────────
+public_datasets/scoliosis/
+public_datasets/scoliosis_train.yaml
+
+# Keep the zip archive (source of truth) and gitkeep
+!public_datasets/.gitkeep
+!public_datasets/*.zip
+
+# ── IDE / OS ─────────────────────────────────────────────
+.vscode/settings.json
+.DS_Store
+Thumbs.db
+
+# ── Ultralytics run artifacts ────────────────────────────
+runs/

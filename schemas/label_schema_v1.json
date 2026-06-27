@@ -1,7 +1,12 @@
 {
-  "label_name": "risk_label",
+  "flag_name": "proxy_screening_flag",
+  "description": "Rule-based screening flag derived from camera-measured ATR proxy. NOT a clinical ground truth label. Independent clinical reference (scoliometer, X-ray Cobb angle) is required for accuracy claims.",
   "rules": {
-    "atr_proxy_deg_max >= 5": 1,
+    "atr_proxy_p95_deg >= 5.0": 1,
     "otherwise": 0
+  },
+  "interpretation": {
+    "0": "ATR proxy below threshold — no screening flag raised",
+    "1": "ATR proxy at or above threshold — follow-up may be recommended"
   }
 }

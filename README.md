@@ -2,7 +2,7 @@
 
 A proof-of-concept RGB-D screening pipeline for school-based scoliosis screening support. The system captures posture during standardised tasks, extracts surface-based geometric features, and produces interpretable screening indicators to assist existing workflows.
 
-All outputs are posture-based screening proxies and do not represent clinical diagnosis, Cobb angle measurement, or medical-grade assessment. Clinician oversight is required for all referral decisions.
+All outputs are camera-derived proxy measurements. They do not represent clinical diagnosis, Cobb angle measurement, or medical-grade assessment. Clinician oversight is required for all referral decisions.
 
 ---
 
@@ -12,28 +12,39 @@ All outputs are posture-based screening proxies and do not represent clinical di
 Kidzonia Project/
 ├── src/
 │   ├── Data Collection/
-│   │   ├── quest_recording_auto.py       # Live RGB-D capture (primary)
-│   │   ├── spine_angle_detection_image.py# Static image capture
+│   │   ├── quest_recording_auto.py          # Live RGB-D capture with subject presence gate
+│   │   └── spine_angle_detection_image.py   # Static image capture
 │   ├── Data Processing/
-│   │   ├── aggregate_all_trials.py       # Frame-level CSV → trial-level dataset
-│   │   ├── aggregate_all_subjects.py     # Legacy subject-level aggregation
-│   │   ├── add_labels.py                 # Adds ATR-based risk labels
-│   │   └── validate_trial_schema.py      # JSON schema validator
-│   └── ML Modelling/
-│       └── train_baseline.py             # Logistic regression baseline
+│   │   ├── aggregate_all_trials.py          # Frame-level CSV → trial-level dataset
+│   │   ├── aggregate_all_subjects.py        # Legacy subject-level aggregation
+│   │   ├── add_labels.py                    # Rule-based proxy screening flag (ATR >= 5 deg)
+│   │   └── validate_trial_schema.py         # JSON schema validator
+│   ├── Inference/
+│   │   └── screen_subject.py               # Run fine-tuned YOLO on image or video → screening output
+│   └── Evaluation/
+│       ├── mediapipe_scoliosis_test.py      # Phase 1: MediaPipe on scoliosis test set
+│       ├── yolo_scoliosis_test.py           # Phase 2a: Pretrained YOLO baseline
+│       ├── train_yolo_scoliosis.py          # Phase 2b: Fine-tune YOLO on scoliosis train/val
+│       ├── yolo_finetuned_scoliosis_test.py # Phase 2c: Fine-tuned YOLO inference + classification
+│       ├── compare_workflows.py             # 3-way comparison: MediaPipe vs YOLO pre vs fine-tuned
+│       └── temporal_stability.py           # Frame-to-frame measurement variance on real recordings
+├── legacy/
+│   └── train_baseline_pending_clinical_labels.py  # LR classifier — valid when independent ATR labels arrive
 ├── schemas/
-│   ├── frame_feature_schema_v1.json      # Per-frame feature contract
-│   ├── trial_feature_schema_v1.json      # Per-trial aggregated feature contract
-│   └── label_schema_v1.json              # Risk label definition
+│   ├── frame_feature_schema_v1.json         # Per-frame feature contract
+│   ├── trial_feature_schema_v1.json         # Per-trial aggregated feature contract
+│   └── label_schema_v1.json                 # Proxy screening flag definition
+├── notebooks/
+│   └── workflow_comparison.ipynb            # Visual 3-way comparison: MediaPipe vs YOLO
 ├── Data/
 │   ├── Raw/
-│   │   ├── raw_data/                     # Live capture output (auto-created)
-│   │   └── spine_image_dataset/          # Static image capture output (auto-created)
-│   └── Processed/                        # Generated trial datasets and CSV artifacts
-├── public_datasets/                      # Sourced online datasets (for model training only, not screening data)
-├── models/                               # Trained model files (auto-created)
-├── example_trial_row.json                # Example row for schema validation
-└── environment.yml                       # Conda environment spec
+│   │   ├── raw_data/                        # Live capture output (auto-created, gitignored)
+│   │   └── spine_image_dataset/             # Static image capture output (auto-created, gitignored)
+│   └── Processed/                           # Generated CSVs (auto-created, gitignored)
+├── public_datasets/                         # Source archives only — extracted images are gitignored
+├── models/                                  # Trained weights (gitignored)
+├── example_trial_row.json                   # Example row for schema validation
+└── environment.yml                          # Conda environment spec
 ```
 
 ---
@@ -46,9 +57,9 @@ Requires **Python 3.12** and Conda. See `environment.yml`.
 conda activate env
 ```
 
-Key dependencies: `openni`, `mediapipe`, `opencv`, `pandas`, `scikit-learn`, `numpy`, `scipy`.
+Key dependencies: `openni`, `mediapipe`, `opencv`, `ultralytics`, `pandas`, `scikit-learn`, `numpy`, `scipy`.
 
-The OpenNI driver requires a compatible RGB-D device (e.g. Kinect v1 or Azure Kinect with OpenNI2 wrapper). Data processing scripts run without any device attached.
+The OpenNI driver requires a compatible RGB-D device (e.g. Kinect v1 or Azure Kinect with OpenNI2 wrapper). All scripts except data collection run without a camera.
 
 ---
 
@@ -56,7 +67,7 @@ The OpenNI driver requires a compatible RGB-D device (e.g. Kinect v1 or Azure Ki
 
 ### Stage 1 — Data Collection (requires camera)
 
-Run a guided screening session for one subject. The system captures three standardised postures:
+Run a guided screening session for one subject across three standardised postures. A **subject presence gate** blocks recording from starting until a valid pose has been detected for at least 1 second, guarding against false detections on empty scenes.
 
 | Quest ID | Posture | Key Features Extracted |
 |---|---|---|
@@ -68,86 +79,97 @@ Run a guided screening session for one subject. The system captures three standa
 python "src/Data Collection/quest_recording_auto.py"
 ```
 
-Output is saved to `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_{n}/`:
+Output → `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_{n}/`:
 - `video.avi` — raw RGB video
 - `features.csv` — frame-level features (one row per frame)
-- `features.json` — same data in JSON format
+- `features.json` — same data in JSON
 - `meta.json` — session metadata
 
 ---
 
-### Stage 2 — Aggregation (no camera required)
+### Stage 2 — Aggregation
 
-Aggregates frame-level CSVs into one row per trial using robust statistics (median and 95th percentile).
+Aggregates frame-level CSVs into one row per trial (median and 95th percentile).
 
 ```bash
 python "src/Data Processing/aggregate_all_trials.py"
 ```
 
-Output: `Data/Processed/aggregated_trials.csv` — one row per trial across all subjects and quests. Override paths with `python aggregate_all_trials.py <input_root> <output_csv>`.
+Output: `Data/Processed/aggregated_trials.csv`
 
 ---
 
-### Stage 3 — Labeling (no camera required)
+### Stage 3 — Screening Flag
 
-Applies an ATR-based risk label to each trial row. Trials with `atr_proxy_p95_deg >= 5.0` are flagged as `risk_label = 1`.
+Applies a rule-based proxy screening flag: trials where `atr_proxy_p95_deg >= 5.0` receive `proxy_screening_flag = 1`.
 
 ```bash
 python "src/Data Processing/add_labels.py"
 ```
 
-Input: `Data/Processed/aggregated_trials.csv` → Output: `Data/Processed/labeled_trials.csv`. Override with explicit paths if needed.
+Output: `Data/Processed/screened_trials.csv`
+
+> **Important:** `proxy_screening_flag` is derived from the camera measurements themselves — it is a rule-based output, not a clinical ground truth. It should not be used as a training target without an independent clinical reference (scoliometer ATR, X-ray Cobb angle). See `legacy/train_baseline_pending_clinical_labels.py` for the classifier that becomes valid once clinical labels are available.
 
 ---
 
-### Stage 4 — Model Training (no camera required)
+### Stage 4 — Inference on New Captures
 
-Trains a logistic regression baseline classifier with feature scaling and cross-validation.
+Run the fine-tuned YOLO model on a single image or video to produce a structured screening output.
 
 ```bash
-python "src/ML Modelling/train_baseline.py" "Data/Processed/labeled_trials.csv" models/baseline_logreg.pkl
+python "src/Inference/screen_subject.py" <image_or_video_path>
 ```
 
-Prints cross-validated ROC-AUC, test classification report, and saves the fitted pipeline (scaler + classifier) to `models/`.
+Output is a JSON object including `spine_angle_deg`, `proxy_screening_flag`, `mean_kp_confidence`, `retake_recommended`, and a placeholder `clinical_atr_deg` field for future clinical comparison.
+
+---
+
+### Stage 5 — Temporal Stability (no camera required)
+
+Measures frame-to-frame variance of trunk angle over a real recording to assess measurement reliability.
+
+```bash
+python "src/Evaluation/temporal_stability.py" <features.csv | raw_data_root>
+```
+
+Reports: angle mean/std, frame-to-frame difference, rolling short-window jitter, pose coverage, and a stability verdict.
 
 ---
 
 ### Schema Validation (optional QA)
 
-Validates a trial-level JSON row against the schema contract.
-
 ```bash
 python "src/Data Processing/validate_trial_schema.py"
 ```
 
-Uses `example_trial_row.json` at the project root as the test input. Replace or extend this file to validate real trial outputs.
+---
+
+## Workflow Comparison Experiment
+
+Compares MediaPipe vs YOLO (pretrained) vs YOLO (fine-tuned) on the scoliosis test set.
+
+```bash
+# Run in order:
+python "src/Evaluation/mediapipe_scoliosis_test.py"
+python "src/Evaluation/yolo_scoliosis_test.py"
+python "src/Evaluation/train_yolo_scoliosis.py"
+python "src/Evaluation/yolo_finetuned_scoliosis_test.py"
+python "src/Evaluation/compare_workflows.py"
+jupyter lab notebooks/workflow_comparison.ipynb
+```
 
 ---
 
-## Testing the Pipeline with an Online Dataset
+## Screening Flag vs Clinical Label
 
-The data processing stages (Steps 2–4) only read CSV files and run without any camera. To test with downloaded data you need a bridge script that converts images into the frame-level CSV schema.
-
-**What to look for in a dataset:**
-
-| Quest | Required posture | Typical availability |
+| | `proxy_screening_flag` | Independent clinical label |
 |---|---|---|
-| Q1 | Posterior or frontal standing view | Common in general pose datasets |
-| Q2 | Adam's forward bend test | Rare; some physio/yoga datasets approximate it |
-| Q3 | Arms-raised upright | Uncommon |
-
-**Adapter approach (to be implemented):**
-
-1. Place downloaded images under a folder organised by subject and posture type.
-2. Run MediaPipe pose estimation on each image (no OpenNI required).
-3. Compute the same features as `quest_recording_auto.py` using the landmark coordinates.
-4. Write one `features.csv` per trial into `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_001/`.
-5. Run aggregation, labeling, and training as normal from Stage 2 onward.
-
-**Limitations with image-only datasets:**
-- Depth-dependent fields (`rib_hump_proxy_px`, `trunk_inclination_3d_deg`) will be `null` — this is handled gracefully by the pipeline.
-- Without Q2 data, `atr_proxy_p95_deg` stays `null` and all labels will be `risk_label = 0`. The classifier cannot be meaningfully trained.
-- Clinical labels (e.g. Cobb angles) from the dataset must be manually mapped to `risk_label` instead of using the ATR threshold rule.
+| **Source** | Camera-derived ATR proxy >= 5 deg | Scoliometer, X-ray Cobb angle, clinician |
+| **Independent?** | No — same pipeline that measures it | Yes |
+| **Use as training target?** | No — circular | Yes — meaningful |
+| **Use as screening output?** | Yes — as a proxy flag | Yes — as a reference |
+| **Status** | Available now | Pending clinical data collection |
 
 ---
 
@@ -166,14 +188,12 @@ The data processing stages (Steps 2–4) only read CSV files and run without any
 
 ### Trial-level aggregated features (`trial_feature_schema_v1.json`)
 
-Aggregated from frame-level using median and 95th percentile. One row per trial per quest per subject.
-
 | Feature | Source |
 |---|---|
 | `standing_symmetry_median` | Median of `standing_symmetry_index` (Q1) |
 | `standing_midline_offset_p95_px` | 95th percentile of midline offset (Q1/Q3) |
 | `trunk_curvature_p95_deg` | 95th percentile of trunk curvature proxy (Q2) |
-| `atr_proxy_p95_deg` | 95th percentile of ATR proxy (Q2) — used for labeling |
+| `atr_proxy_p95_deg` | 95th percentile of ATR proxy (Q2) — used for screening flag |
 | `rib_hump_proxy_p95_px` | 95th percentile of rib hump proxy (Q2) |
 | `trunk_inclination_2d_median_deg` | Median trunk inclination (all quests) |
 | `trunk_inclination_2d_p95_deg` | 95th percentile trunk inclination (all quests) |
@@ -183,21 +203,21 @@ Aggregated from frame-level using median and 95th percentile. One row per trial 
 
 ## Known Limitations
 
-- **Landmark instability**: Pose landmarks may be unreliable under loose clothing. No clothing-correction or confidence filtering is currently applied beyond `pose_present`.
-- **Posture dependence**: Geometric measurements vary with posture compliance. No posture normalisation step is implemented yet.
-- **False detections**: No subject-presence validation before feature extraction.
-- **2D-only features**: All angular features are image-plane projections. Depth is captured but not fully integrated into calibrated 3D measurements.
-- **No inference script**: The trained model cannot yet be applied to new recordings without additional code.
+- **Landmark instability**: Pose landmarks may be unreliable under loose clothing.
+- **Posture dependence**: Geometric measurements vary with posture compliance. No posture normalisation implemented yet.
+- **Proxy measurements only**: All angular features are camera-derived proxies, not validated clinical measurements.
+- **2D-only features**: Angular features are image-plane projections. Depth is captured but not fully integrated.
+- **No independent clinical labels yet**: `proxy_screening_flag` cannot be used as a training target until scoliometer/clinical ATR labels are collected.
 
 ---
 
 ## External Datasets
 
-| Dataset | Source | Use in this project |
-|---|---|---|
-| Posture Keypoints Detection | [Kaggle — melsmm](https://www.kaggle.com/datasets/melsmm/posture-keypoints-detection) | Fine-tuning the spine keypoint detector (YOLO pose format, 4 spine landmarks). Not used as screening data. |
+| Dataset | Source | Keypoints | Classes | License |
+|---|---|---|---|---|
+| Scoliosis Keypoint Model v3 | [Roboflow Universe — cobacoba](https://universe.roboflow.com/cobacoba-vjxyv/scoliosis-keypoint-model-ahvid/dataset/3) | 12 (spine-specific) | normal / scoliosis | CC BY 4.0 |
 
-Stored under `public_datasets/posture/`. Raw files are not modified.
+Stored under `public_datasets/scoliosis/` (gitignored — re-extract from `.zip`). Used for YOLO fine-tuning and workflow comparison. Dataset-provided labels used for evaluation; not verified against X-ray.
 
 ---
 

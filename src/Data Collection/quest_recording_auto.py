@@ -15,6 +15,7 @@ import time
 import csv
 import json
 import re
+from collections import deque
 
 # ---------------- CONFIG ----------------
 QUESTS = [
@@ -33,6 +34,10 @@ RECORD_SCALE = 2.0
 COUNTDOWN_SEC = 3
 RECORD_SEC = 5
 ANGLE_SMOOTH_WINDOW = 10
+
+# Subject presence gate — blocks recording if no valid pose in recent window
+PRESENCE_WINDOW_FRAMES = 30   # 1 second at 30 fps
+PRESENCE_THRESHOLD = 0.5      # >50% of recent frames must have valid pose
 # ---------------------------------------
 
 
@@ -145,6 +150,7 @@ def main():
     json_records = []
 
     buf_2d, buf_3d, buf_curv = [], [], []
+    presence_buffer = deque(maxlen=PRESENCE_WINDOW_FRAMES)
 
     try:
         while True:
@@ -176,6 +182,13 @@ def main():
                 rh_vis = lm[24].visibility
                 if min(ls_vis, rs_vis, lh_vis, rh_vis) < 0.6:
                     pose_present = False
+
+            # -------- Subject presence gate --------
+            presence_buffer.append(int(pose_present))
+            subject_present = (
+                len(presence_buffer) == PRESENCE_WINDOW_FRAMES
+                and sum(presence_buffer) / PRESENCE_WINDOW_FRAMES >= PRESENCE_THRESHOLD
+            )
 
             # -------- initialise ALL features as None --------
             delta_shoulder_height_px = None
@@ -374,7 +387,10 @@ def main():
             img_rec[:] = cv2.addWeighted(overlay, 0.35, img_rec, 0.65, 0)
 
             if mode == "IDLE":
-                status = "IDLE | [S] Start  [N] Next  [B] Back  [ESC] Quit"
+                if not subject_present:
+                    status = "WAITING FOR SUBJECT — ensure person is fully visible"
+                else:
+                    status = "IDLE | [S] Start  [N] Next  [B] Back  [ESC] Quit"
             elif mode == "COUNTDOWN":
                 status = f"COUNTDOWN: {max(0, COUNTDOWN_SEC - int(now - countdown_start))}s"
             else:
@@ -402,8 +418,11 @@ def main():
             if key == 27:
                 break
             if key in (ord('s'), ord('S')) and mode == "IDLE":
-                mode = "COUNTDOWN"
-                countdown_start = now
+                if not subject_present:
+                    print("[GATE] Recording blocked — no valid subject detected in last 1s window.")
+                else:
+                    mode = "COUNTDOWN"
+                    countdown_start = now
             if key in (ord('n'), ord('N')) and mode == "IDLE":
                 quest_idx = clamp(quest_idx + 1, 0, len(QUESTS) - 1)
                 quest_id, quest_prompt = QUESTS[quest_idx]
