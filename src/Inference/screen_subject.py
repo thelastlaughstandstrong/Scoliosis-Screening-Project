@@ -14,6 +14,7 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # ATR/scoliometer labels (not yet collected).
 # ============================================================
 
+import sys
 import cv2
 import numpy as np
 import json
@@ -25,10 +26,15 @@ from ultralytics import YOLO
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_WEIGHTS = PROJECT_ROOT / "models" / "yolo_scoliosis" / "run" / "weights" / "best.pt"
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config.keypoint_schema import SPINE_BASE_LUMBAR, SPINE_TOP_CERVICAL
+
 ATR_PROXY_THRESHOLD_DEG = 5.0
 VISIBILITY_THRESHOLD    = 0.5
-SPINE_BOTTOM_IDX        = 0
-SPINE_TOP_IDX           = 8
+SPINE_BOTTOM_IDX        = SPINE_BASE_LUMBAR
+SPINE_TOP_IDX           = SPINE_TOP_CERVICAL
 CLASS_NAMES             = {0: "normal", 1: "scoliosis"}
 
 

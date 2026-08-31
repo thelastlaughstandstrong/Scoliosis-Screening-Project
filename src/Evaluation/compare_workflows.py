@@ -3,10 +3,10 @@
 # Reads output CSVs and prints a 3-way summary table
 #
 # Run order:
-#   1. mediapipe_scoliosis_test.py
-#   2. yolo_scoliosis_test.py
+#   1. run_evaluation.py --model mediapipe
+#   2. run_evaluation.py --model yolo_pretrained
 #   3. train_yolo_scoliosis.py
-#   4. yolo_finetuned_scoliosis_test.py
+#   4. run_evaluation.py --model yolo_finetuned
 #   5. compare_workflows.py  (this script)
 # ============================================================
 
@@ -51,6 +51,23 @@ def summarise(df, label):
         if len(scoli_cls):
             scoli_recall = (scoli_cls["predicted_class"] == "scoliosis").mean()
 
+    # Spine geometry — only present for the fine-tuned YOLO workflow (spine_geometry.py output)
+    geometry_valid_pct              = None
+    mean_max_lateral_deviation_px   = None
+    mean_curve_smoothness_score     = None
+    mean_spine_axis_inclination_deg = None
+    if "valid_spine_geometry" in df.columns:
+        geometry_valid_pct = round(100 * df["valid_spine_geometry"].mean(), 1)
+    if "max_lateral_deviation_px" in df.columns:
+        vals = df["max_lateral_deviation_px"].dropna()
+        mean_max_lateral_deviation_px = round(vals.mean(), 2) if len(vals) else None
+    if "curve_smoothness_score" in df.columns:
+        vals = df["curve_smoothness_score"].dropna()
+        mean_curve_smoothness_score = round(vals.mean(), 2) if len(vals) else None
+    if "spine_axis_inclination_deg" in df.columns:
+        vals = df["spine_axis_inclination_deg"].dropna()
+        mean_spine_axis_inclination_deg = round(vals.mean(), 2) if len(vals) else None
+
     return {
         "workflow":           label,
         "valid_pct":          round(100 * valid / total, 1),
@@ -62,6 +79,10 @@ def summarise(df, label):
         "scoliosis_det_rate": round(s_det_rate, 3) if s_det_rate is not None else None,
         "classification_acc": round(cls_acc, 3) if cls_acc is not None else None,
         "scoliosis_recall":   round(scoli_recall, 3) if scoli_recall is not None else None,
+        "geometry_valid_pct":              geometry_valid_pct,
+        "mean_max_lateral_deviation_px":   mean_max_lateral_deviation_px,
+        "mean_curve_smoothness_score":     mean_curve_smoothness_score,
+        "mean_spine_axis_inclination_deg": mean_spine_axis_inclination_deg,
     }
 
 
@@ -151,6 +172,26 @@ def run():
                     delta = val - base
                     sign  = "+" if delta >= 0 else ""
                     row  += f"{sign}{delta:.2f}{unit:<{col_width - len(f'{sign}{delta:.2f}')}}".ljust(col_width)
+            print(row)
+
+    # ---- Spine geometry summary (fine-tuned YOLO only — see spine_geometry.py) ----
+    geom_labels = [l for l in col_labels if stats[l].get("geometry_valid_pct") is not None]
+    if geom_labels:
+        geom_metrics = [
+            ("Spine geometry valid",         "geometry_valid_pct",              "%"),
+            ("Mean max lateral deviation",   "mean_max_lateral_deviation_px",   " px"),
+            ("Mean curve smoothness score",  "mean_curve_smoothness_score",     ""),
+            ("Mean spine axis inclination",  "mean_spine_axis_inclination_deg", " deg"),
+        ]
+        print(f"\n  SPINE GEOMETRY  (fine-tuned YOLO only — screening-support proxies, not clinical ATR/Cobb)")
+        print(f"  {'-'*32}" + "-" * (col_width * len(geom_labels)))
+        header2 = f"  {'Metric':<32}" + "".join(f"{c:<{col_width}}" for c in geom_labels)
+        print(header2)
+        for name, key, unit in geom_metrics:
+            row = f"  {name:<32}"
+            for label in geom_labels:
+                val = stats[label].get(key)
+                row += f"{fmt(val, unit):<{col_width}}"
             print(row)
 
     # ---- Notes on angle comparability ----

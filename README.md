@@ -12,20 +12,22 @@ All outputs are camera-derived proxy measurements. They do not represent clinica
 Kidzonia Project/
 ├── src/
 │   ├── Data Collection/
-│   │   ├── quest_recording_auto.py          # Live RGB-D capture with subject presence gate
+│   │   ├── quest_recording_auto.py          # Live RGB-D capture — MediaPipe keypoints
+│   │   ├── quest_recording_yolo.py          # Live RGB-D capture — fine-tuned YOLO keypoints
+│   │   ├── extract_frames.py                # Extract 1 fps frames from videos for pseudo-labeling
 │   │   └── spine_angle_detection_image.py   # Static image capture
 │   ├── Data Processing/
 │   │   ├── aggregate_all_trials.py          # Frame-level CSV → trial-level dataset
 │   │   ├── aggregate_all_subjects.py        # Legacy subject-level aggregation
 │   │   ├── add_labels.py                    # Rule-based proxy screening flag (ATR >= 5 deg)
+│   │   ├── pseudo_label_mediapipe.py        # Auto-label captured frames with MediaPipe → YOLO format
 │   │   └── validate_trial_schema.py         # JSON schema validator
 │   ├── Inference/
 │   │   └── screen_subject.py               # Run fine-tuned YOLO on image or video → screening output
 │   └── Evaluation/
-│       ├── mediapipe_scoliosis_test.py      # Phase 1: MediaPipe on scoliosis test set
-│       ├── yolo_scoliosis_test.py           # Phase 2a: Pretrained YOLO baseline
-│       ├── train_yolo_scoliosis.py          # Phase 2b: Fine-tune YOLO on scoliosis train/val
-│       ├── yolo_finetuned_scoliosis_test.py # Phase 2c: Fine-tuned YOLO inference + classification
+│       ├── run_evaluation.py                # MediaPipe / YOLO pretrained / YOLO fine-tuned test-set eval (--model)
+│       ├── train_yolo_scoliosis.py          # Fine-tune YOLO on scoliosis train/val
+│       ├── train_yolo_combined.py           # Fine-tune on Roboflow + domain pseudo-labeled data
 │       ├── compare_workflows.py             # 3-way comparison: MediaPipe vs YOLO pre vs fine-tuned
 │       └── temporal_stability.py           # Frame-to-frame measurement variance on real recordings
 ├── legacy/
@@ -34,8 +36,6 @@ Kidzonia Project/
 │   ├── frame_feature_schema_v1.json         # Per-frame feature contract
 │   ├── trial_feature_schema_v1.json         # Per-trial aggregated feature contract
 │   └── label_schema_v1.json                 # Proxy screening flag definition
-├── notebooks/
-│   └── workflow_comparison.ipynb            # Visual 3-way comparison: MediaPipe vs YOLO
 ├── Data/
 │   ├── Raw/
 │   │   ├── raw_data/                        # Live capture output (auto-created, gitignored)
@@ -43,6 +43,7 @@ Kidzonia Project/
 │   └── Processed/                           # Generated CSVs (auto-created, gitignored)
 ├── public_datasets/                         # Source archives only — extracted images are gitignored
 ├── models/                                  # Trained weights (gitignored)
+├── workflow_comparison.ipynb                # Visual 3-way comparison: MediaPipe vs YOLO
 ├── example_trial_row.json                   # Example row for schema validation
 └── environment.yml                          # Conda environment spec
 ```
@@ -75,15 +76,28 @@ Run a guided screening session for one subject across three standardised posture
 | Q2_forward_bend | Adam's forward bend | ATR proxy, trunk curvature, rib hump proxy |
 | Q3_upward_stretch | Arms-up stretch | Trunk inclination, midline offset |
 
+Two detector options — run the same session with both to compare outputs:
+
+| Script | Detector | Extra columns |
+|---|---|---|
+| `quest_recording_auto.py` | MediaPipe (33 landmarks) | `trunk_curvature_proxy_2d_deg` |
+| `quest_recording_yolo.py` | Fine-tuned YOLO 12-pt | `predicted_class`, `mean_kp_confidence`, `yolo_box_confidence` |
+
 ```bash
+# MediaPipe version (no trained model required)
 python "src/Data Collection/quest_recording_auto.py"
+
+# YOLO version (requires trained weights in models/)
+python "src/Data Collection/quest_recording_yolo.py"
 ```
+
+Both scripts require the fine-tuned model to exist for the YOLO version. Run `train_yolo_scoliosis.py` first.
 
 Output → `Data/Raw/raw_data/{subject_id}/{quest_id}/trial_{n}/`:
 - `video.avi` — raw RGB video
 - `features.csv` — frame-level features (one row per frame)
 - `features.json` — same data in JSON
-- `meta.json` — session metadata
+- `meta.json` — session metadata (includes `"detector": "yolo"` for YOLO runs)
 
 ---
 
@@ -151,12 +165,12 @@ Compares MediaPipe vs YOLO (pretrained) vs YOLO (fine-tuned) on the scoliosis te
 
 ```bash
 # Run in order:
-python "src/Evaluation/mediapipe_scoliosis_test.py"
-python "src/Evaluation/yolo_scoliosis_test.py"
+python "src/Evaluation/run_evaluation.py" --model mediapipe
+python "src/Evaluation/run_evaluation.py" --model yolo_pretrained
 python "src/Evaluation/train_yolo_scoliosis.py"
-python "src/Evaluation/yolo_finetuned_scoliosis_test.py"
+python "src/Evaluation/run_evaluation.py" --model yolo_finetuned
 python "src/Evaluation/compare_workflows.py"
-jupyter lab notebooks/workflow_comparison.ipynb
+jupyter lab workflow_comparison.ipynb
 ```
 
 ---

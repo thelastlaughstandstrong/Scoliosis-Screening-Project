@@ -11,12 +11,18 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Domain data teaches the model your camera/lighting/clothing conditions.
 # ============================================================
 
+import sys
 import shutil
 import yaml
 from pathlib import Path
 from ultralytics import YOLO
 
 PROJECT_ROOT   = Path(__file__).resolve().parents[2]
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config.keypoint_schema import NUM_KEYPOINTS
 ROBOFLOW_DIR   = PROJECT_ROOT / "public_datasets" / "scoliosis"
 DOMAIN_DIR     = PROJECT_ROOT / "public_datasets" / "domain_data"
 COMBINED_DIR   = PROJECT_ROOT / "public_datasets" / "combined_data"
@@ -71,8 +77,8 @@ def make_yaml():
         "path":       str(COMBINED_DIR),
         "train":      "train/images",
         "val":        "valid/images",
-        "kpt_shape":  [12, 3],
-        "flip_idx":   list(range(12)),
+        "kpt_shape":  [NUM_KEYPOINTS, 3],
+        "flip_idx":   list(range(NUM_KEYPOINTS)),
         "nc":         2,
         "names":      {0: "normal", 1: "scoliosis"},
     }

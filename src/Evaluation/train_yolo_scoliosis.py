@@ -7,6 +7,7 @@
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
+import sys
 import yaml
 from pathlib import Path
 from ultralytics import YOLO
@@ -16,6 +17,11 @@ DATASET_DIR  = PROJECT_ROOT / "public_datasets" / "scoliosis"
 MODEL_DIR    = PROJECT_ROOT / "models" / "yolo_scoliosis"
 YAML_PATH    = PROJECT_ROOT / "public_datasets" / "scoliosis_train.yaml"
 
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config.keypoint_schema import NUM_KEYPOINTS
+
 
 def make_data_yaml():
     """Create a data yaml with absolute paths — the packaged one uses broken relative paths."""
@@ -24,8 +30,8 @@ def make_data_yaml():
         "train": "train/images",
         "val":   "valid/images",
         "test":  "test/images",
-        "kpt_shape": [12, 3],
-        "flip_idx":  list(range(12)),
+        "kpt_shape": [NUM_KEYPOINTS, 3],
+        "flip_idx":  list(range(NUM_KEYPOINTS)),
         "nc": 2,
         "names": {0: "normal", 1: "scoliosis"},
     }
@@ -62,7 +68,7 @@ def train():
 
     best_weights = MODEL_DIR / "run" / "weights" / "best.pt"
     print(f"\n[DONE] Best model saved to: {best_weights}")
-    print(f"       Run the fine-tuned evaluation with: yolo_finetuned_scoliosis_test.py")
+    print(f"       Run the fine-tuned evaluation with: run_evaluation.py --model yolo_finetuned")
     return best_weights
 
 
