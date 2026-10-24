@@ -3,18 +3,26 @@
 # Runs the fine-tuned YOLO spine model on a handful of test
 # images, prints the anatomy-aware geometry features, and
 # optionally saves annotated images showing:
-#   - kp[0] -> kp[8] reference line
+#   - kp[0] -> kp[8] reference line (spine axis)
 #   - intermediate spine keypoints (kp[1..7])
-#   - perpendicular deviation of each intermediate point
+#   - perpendicular lateral-deviation line for each intermediate point
+#   - shoulder line (kp[9]-kp[10])
+#   - reliability_level + anatomy_reliability_score (colour-coded)
+#   - retake_or_review_recommended
+#   - anatomy_warning_flags / geometry_failure_reason
 #
 # This is a sanity/debug tool, not a formal evaluation script.
 # Use run_evaluation.py + compare_workflows.py for the full
-# test-set comparison.
+# test-set comparison. Outputs are screening-support indicators
+# only — not a diagnosis.
 #
 # Usage:
 #   python debug_spine_geometry.py            (first 5 test images, saves annotated images)
 #   python debug_spine_geometry.py --n 10
 #   python debug_spine_geometry.py --no-save
+#   python debug_spine_geometry.py --data-yaml <data.yaml> --split test    (default: original public dataset, test)
+#   python debug_spine_geometry.py --weights models/yolo_scoliosis_cleaned/run/weights/best.pt
+#       --out-dir Data/Processed/geometry_debug/cleaned_trained --stems <test_image_stem> [<stem> ...]
 # ============================================================
 
 import os
@@ -36,15 +44,23 @@ from src.config.keypoint_schema import (
     LEFT_SHOULDER, RIGHT_SHOULDER, DEFAULT_CONFIDENCE_THRESHOLD,
 )
 from src.FeatureExtraction.spine_geometry import extract_spine_geometry, empty_spine_geometry
+from src.Evaluation.dataset_paths import resolve_split
 
-TEST_IMAGES       = PROJECT_ROOT / "public_datasets" / "scoliosis" / "test" / "images"
 FINETUNED_WEIGHTS = PROJECT_ROOT / "models" / "yolo_scoliosis" / "run" / "weights" / "best.pt"
-OUTPUT_DIR        = PROJECT_ROOT / "Data" / "Processed" / "comparison" / "debug_spine_geometry"
+OUTPUT_DIR        = PROJECT_ROOT / "Data" / "Processed" / "geometry_debug"
 
 
 def imdecode_unicode(img_path: Path):
     # cv2.imread fails on Windows paths with non-ASCII chars; use imdecode instead
     return cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+
+
+RELIABILITY_COLORS = {
+    "high":    (0, 200, 0),
+    "medium":  (0, 200, 255),
+    "low":     (0, 120, 255),
+    "invalid": (0, 0, 255),
+}
 
 
 def draw_annotated(img, kps, geometry, confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD):
@@ -84,28 +100,56 @@ def draw_annotated(img, kps, geometry, confidence_threshold=DEFAULT_CONFIDENCE_T
     if visible(LEFT_SHOULDER) and visible(RIGHT_SHOULDER):
         cv2.line(out, pt(LEFT_SHOULDER), pt(RIGHT_SHOULDER), (255, 0, 255), 2)
 
+    level = geometry.get("reliability_level", "invalid")
+    color = RELIABILITY_COLORS.get(level, (0, 0, 255))
+
     label = "geom OK" if geometry["valid_spine_geometry"] else f"geom INVALID ({geometry['geometry_failure_reason']})"
-    color = (0, 200, 0) if geometry["valid_spine_geometry"] else (0, 0, 255)
     cv2.putText(out, label, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    cv2.putText(out, f"reliability: {level}  score={geometry.get('anatomy_reliability_score')}",
+                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    retake_txt = "retake/review: YES" if geometry.get("retake_or_review_recommended") else "retake/review: no"
+    cv2.putText(out, retake_txt, (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+    flags = geometry.get("anatomy_warning_flags") or ""
+    if flags:
+        y = 94
+        for flag in flags.split("; "):
+            cv2.putText(out, f"! {flag}", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
+            y += 18
+
     return out
 
 
-def run(n: int, save: bool):
-    if not FINETUNED_WEIGHTS.exists():
-        print(f"[ERROR] Fine-tuned weights not found at: {FINETUNED_WEIGHTS}")
+def run(n: int, save: bool, weights: Path = None, out_dir: Path = None, stems=None, data_yaml=None, split: str = "test"):
+    weights = Path(weights).resolve() if weights else FINETUNED_WEIGHTS
+    output_dir = Path(out_dir).resolve() if out_dir else OUTPUT_DIR
+
+    if not weights.exists():
+        print(f"[ERROR] Fine-tuned weights not found at: {weights}")
         print("        Run train_yolo_scoliosis.py first.")
         return
 
     from ultralytics import YOLO
-    model = YOLO(str(FINETUNED_WEIGHTS))
+    model = YOLO(str(weights))
 
-    image_files = sorted(list(TEST_IMAGES.glob("*.jpg")) + list(TEST_IMAGES.glob("*.png")))[:n]
+    try:
+        images_dir = resolve_split(data_yaml, split)["images_dir"]
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        print(f"[ERROR] {e}")
+        return
+    image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
+    if stems:
+        image_files = [p for p in image_files if p.stem in set(stems)]
+    else:
+        image_files = image_files[:n]
     if not image_files:
-        print(f"[ERROR] No images found in {TEST_IMAGES}")
+        print(f"[ERROR] No images found in {images_dir}")
         return
 
     if save:
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     for img_path in image_files:
         img = imdecode_unicode(img_path)
@@ -135,17 +179,28 @@ def run(n: int, save: bool):
 
         if save and pose_present:
             annotated = draw_annotated(img, kps, geometry)
-            out_path = OUTPUT_DIR / f"{img_path.stem}_geometry.jpg"
+            out_path = output_dir / f"{img_path.stem}_geometry.jpg"
             cv2.imencode(".jpg", annotated)[1].tofile(str(out_path))
             print(f"  [SAVED] {out_path.relative_to(PROJECT_ROOT)}")
 
     if save:
-        print(f"\n[DONE] Annotated images saved to: {OUTPUT_DIR.relative_to(PROJECT_ROOT)}")
+        print(f"\n[DONE] Annotated images saved to: {output_dir.relative_to(PROJECT_ROOT)}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sanity-check spine geometry feature extraction on a few test images.")
     parser.add_argument("--n", type=int, default=5, help="Number of test images to inspect (default: 5)")
     parser.add_argument("--no-save", action="store_true", help="Skip saving annotated images")
+    parser.add_argument("--weights", type=Path, default=None,
+                         help="Fine-tuned weights to use instead of the default original-trained model.")
+    parser.add_argument("--out-dir", type=Path, default=None,
+                         help="Where to save annotated images (default: Data/Processed/geometry_debug).")
+    parser.add_argument("--stems", nargs="+", default=None,
+                         help="Inspect these test-image filename stems instead of the first --n images.")
+    parser.add_argument("--data-yaml", default=None,
+                         help="YOLO data yaml whose images to inspect (default: the original public dataset).")
+    parser.add_argument("--split", default="test", choices=["train", "valid", "val", "test"],
+                         help="Which split of --data-yaml to inspect (default: test).")
     args = parser.parse_args()
-    run(args.n, save=not args.no_save)
+    run(args.n, save=not args.no_save, weights=args.weights, out_dir=args.out_dir, stems=args.stems,
+        data_yaml=args.data_yaml, split=args.split)

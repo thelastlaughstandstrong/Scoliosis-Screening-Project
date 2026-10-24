@@ -8,13 +8,27 @@
 #   3. train_yolo_scoliosis.py
 #   4. run_evaluation.py --model yolo_finetuned
 #   5. compare_workflows.py  (this script)
+#
+# By default it reads the legacy-named CSVs (old public test split) and writes
+# comparison_summary.csv. To compare results from another dataset/split, such as
+# the grouped split, pass the CSVs explicitly:
+#   python compare_workflows.py --finetuned-csv <csv> [--mediapipe-csv <csv>] [--pretrained-csv <csv>] #       --out-name grouped
+# It checks each CSV's .meta.json sidecar (written by run_evaluation.py) and warns if the
+# results come from different test sets, or were produced by a model trained on the old split.
 # ============================================================
 
+import argparse
+import sys
 import pandas as pd
 from pathlib import Path
 
 PROJECT_ROOT   = Path(__file__).resolve().parents[2]
 COMPARISON_DIR = PROJECT_ROOT / "Data" / "Processed" / "comparison"
+
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.Evaluation.dataset_paths import read_meta, describe_eval, is_legacy_eval, OLD_SPLIT_WARNING
 
 CSVS = {
     "MediaPipe":          COMPARISON_DIR / "mediapipe_scoliosis_test.csv",
@@ -68,6 +82,32 @@ def summarise(df, label):
         vals = df["spine_axis_inclination_deg"].dropna()
         mean_spine_axis_inclination_deg = round(vals.mean(), 2) if len(vals) else None
 
+    # Anatomy-aware reliability layer — only present for the fine-tuned YOLO workflow
+    # (src/FeatureExtraction/spine_geometry.py output). These describe measurement
+    # quality, not disease severity — see that module's docstring.
+    mean_reliability_score      = None
+    median_reliability_score    = None
+    reliability_high_count      = None
+    reliability_medium_count    = None
+    reliability_low_count       = None
+    reliability_invalid_count   = None
+    retake_or_review_pct        = None
+    curvature_reliable_pct      = None
+    if "anatomy_reliability_score" in df.columns:
+        vals = df["anatomy_reliability_score"].dropna()
+        mean_reliability_score   = round(vals.mean(), 3) if len(vals) else None
+        median_reliability_score = round(vals.median(), 3) if len(vals) else None
+    if "reliability_level" in df.columns:
+        counts = df["reliability_level"].value_counts()
+        reliability_high_count    = int(counts.get("high", 0))
+        reliability_medium_count  = int(counts.get("medium", 0))
+        reliability_low_count     = int(counts.get("low", 0))
+        reliability_invalid_count = int(counts.get("invalid", 0))
+    if "retake_or_review_recommended" in df.columns:
+        retake_or_review_pct = round(100 * df["retake_or_review_recommended"].mean(), 1)
+    if "curvature_features_reliable" in df.columns:
+        curvature_reliable_pct = round(100 * df["curvature_features_reliable"].mean(), 1)
+
     return {
         "workflow":           label,
         "valid_pct":          round(100 * valid / total, 1),
@@ -83,7 +123,27 @@ def summarise(df, label):
         "mean_max_lateral_deviation_px":   mean_max_lateral_deviation_px,
         "mean_curve_smoothness_score":     mean_curve_smoothness_score,
         "mean_spine_axis_inclination_deg": mean_spine_axis_inclination_deg,
+        "mean_reliability_score":          mean_reliability_score,
+        "median_reliability_score":        median_reliability_score,
+        "reliability_high_count":          reliability_high_count,
+        "reliability_medium_count":        reliability_medium_count,
+        "reliability_low_count":           reliability_low_count,
+        "reliability_invalid_count":       reliability_invalid_count,
+        "retake_or_review_pct":            retake_or_review_pct,
+        "curvature_reliable_pct":          curvature_reliable_pct,
     }
+
+
+def normal_vs_scoliosis(df, column):
+    """Mean of `column`, split by ground-truth class — for spotting whether a
+    geometry feature actually separates normal vs. scoliosis in this sample."""
+    if column not in df.columns:
+        return None, None
+    n_vals = df.loc[df["ground_truth_class"] == "normal", column].dropna()
+    s_vals = df.loc[df["ground_truth_class"] == "scoliosis", column].dropna()
+    n_mean = round(n_vals.mean(), 4) if len(n_vals) else None
+    s_mean = round(s_vals.mean(), 4) if len(s_vals) else None
+    return n_mean, s_mean
 
 
 def fmt(val, unit=""):
@@ -94,11 +154,28 @@ def fmt(val, unit=""):
     return f"{val}{unit}"
 
 
-def run():
+def print_provenance(csvs, frames):
+    """Say what each results CSV was evaluated on, and warn about mixed test sets / old-split models."""
+    metas = {label: read_meta(csvs[label]) for label in frames}
+    print("  Evaluated on:")
+    for label, meta in metas.items():
+        print(f"   - {label:<20} {describe_eval(meta)}")
+    datasets = {(m or {}).get("eval_dataset", "legacy") + "/" + (m or {}).get("eval_split", "test") for m in metas.values()}
+    if len(datasets) > 1:
+        print("  [WARN] These results come from DIFFERENT test sets — they are not directly comparable.")
+    if any((m or {}).get("old_split_warning") for m in metas.values()):
+        print(f"  [WARN] {OLD_SPLIT_WARNING}")
+    if all(is_legacy_eval(m) for m in metas.values()):
+        print("  [NOTE] Old public test split: near-duplicate photos are shared with train/valid, so these numbers are "
+              "historical/debug only once the grouped split exists.")
+
+
+def run(csvs=None, out_name="summary"):
+    csvs = csvs or CSVS
     # Load whichever CSVs exist
     frames = {}
     missing = []
-    for label, path in CSVS.items():
+    for label, path in csvs.items():
         if path.exists():
             frames[label] = pd.read_csv(path)
         else:
@@ -124,6 +201,7 @@ def run():
     print(f"  3-WAY WORKFLOW COMPARISON")
     print(f"  Test set: {n_total} images ({n_normal} normal, {n_scoli} scoliosis)")
     print(f"  WARNING: {n_scoli} scoliosis cases only — treat scoliosis metrics as indicative.")
+    print_provenance(csvs, frames)
     print(f"{'='*70}")
 
     # ---- Per-workflow summary ----
@@ -194,6 +272,56 @@ def run():
                 row += f"{fmt(val, unit):<{col_width}}"
             print(row)
 
+    # ---- Anatomy-aware reliability summary (fine-tuned YOLO only) ----
+    reliability_labels = [l for l in col_labels if stats[l].get("mean_reliability_score") is not None]
+    if reliability_labels:
+        print(f"\n  ANATOMY-AWARE RELIABILITY  (fine-tuned YOLO only — measurement quality, not diagnosis)")
+        print(f"  {'-'*32}" + "-" * (col_width * len(reliability_labels)))
+        rel_metrics = [
+            ("Mean reliability score",       "mean_reliability_score",   ""),
+            ("Median reliability score",     "median_reliability_score", ""),
+            ("Retake/review recommended",    "retake_or_review_pct",     "%"),
+            ("Curvature features reliable",  "curvature_reliable_pct",   "%"),
+        ]
+        header3 = f"  {'Metric':<32}" + "".join(f"{c:<{col_width}}" for c in reliability_labels)
+        print(header3)
+        for name, key, unit in rel_metrics:
+            row = f"  {name:<32}"
+            for label in reliability_labels:
+                val = stats[label].get(key)
+                row += f"{fmt(val, unit):<{col_width}}"
+            print(row)
+
+        print(f"\n  Reliability level counts (high / medium / low / invalid):")
+        for label in reliability_labels:
+            s = stats[label]
+            counts_str = " / ".join(str(s.get(k, 0)) for k in (
+                "reliability_high_count", "reliability_medium_count",
+                "reliability_low_count", "reliability_invalid_count",
+            ))
+            print(f"    {label:<22}: {counts_str}")
+
+    # ---- Normal vs. scoliosis feature comparison (fine-tuned YOLO only) ----
+    if "YOLO (fine-tuned)" in frames:
+        ft_df = frames["YOLO (fine-tuned)"]
+        compare_cols = [
+            ("normalized_max_lateral_deviation",  "Normalized max lateral deviation"),
+            ("normalized_mean_lateral_deviation", "Normalized mean lateral deviation"),
+            ("shoulder_height_difference_px",     "Shoulder height difference (px)"),
+            ("spine_axis_inclination_deg",        "Spine axis inclination (deg)"),
+            ("curve_smoothness_score",            "Curve smoothness score"),
+        ]
+        available = [(c, name) for c, name in compare_cols if c in ft_df.columns]
+        if available:
+            name_width = max(34, max(len(name) for _, name in available) + 2)
+            print(f"\n  NORMAL vs. SCOLIOSIS  (fine-tuned YOLO only — feature means by ground-truth class)")
+            print(f"  Sample sizes are small — read as indicative, not statistically confirmed.")
+            print(f"  {'-'*name_width}{'-'*col_width}{'-'*col_width}")
+            print(f"  {'Feature':<{name_width}}{'Normal':<{col_width}}{'Scoliosis':<{col_width}}")
+            for col, name in available:
+                n_mean, s_mean = normal_vs_scoliosis(ft_df, col)
+                print(f"  {name:<{name_width}}{fmt(n_mean):<{col_width}}{fmt(s_mean):<{col_width}}")
+
     # ---- Notes on angle comparability ----
     print(f"\n  NOTES ON ANGLE COMPARABILITY:")
     print(f"  - MediaPipe primary_angle: shoulder-midpoint to hip-midpoint (body axis proxy)")
@@ -203,11 +331,18 @@ def run():
     print(f"  Use detection rate, confidence, and classification accuracy for comparison.")
 
     # ---- Save summary CSV ----
-    out_path = COMPARISON_DIR / "comparison_summary.csv"
+    out_path = COMPARISON_DIR / f"comparison_{out_name}.csv"
     pd.DataFrame(list(stats.values())).to_csv(out_path, index=False)
     print(f"\n  Summary saved to: {out_path.name} (in Data/Processed/comparison/)")
     print(f"{'='*70}\n")
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="Compare MediaPipe / YOLO pretrained / YOLO fine-tuned evaluation results.")
+    parser.add_argument("--mediapipe-csv", type=Path, default=CSVS["MediaPipe"], help="MediaPipe results CSV.")
+    parser.add_argument("--pretrained-csv", type=Path, default=CSVS["YOLO (pretrained)"], help="Pretrained-YOLO results CSV.")
+    parser.add_argument("--finetuned-csv", type=Path, default=CSVS["YOLO (fine-tuned)"], help="Fine-tuned-YOLO results CSV.")
+    parser.add_argument("--out-name", default="summary",
+                         help="Writes comparison_<out-name>.csv (default: summary, i.e. the existing comparison_summary.csv).")
+    a = parser.parse_args()
+    run({"MediaPipe": a.mediapipe_csv, "YOLO (pretrained)": a.pretrained_csv, "YOLO (fine-tuned)": a.finetuned_csv}, a.out_name)

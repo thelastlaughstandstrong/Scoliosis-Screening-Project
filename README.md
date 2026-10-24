@@ -24,11 +24,21 @@ Kidzonia Project/
 │   │   └── validate_trial_schema.py         # JSON schema validator
 │   ├── Inference/
 │   │   └── screen_subject.py               # Run fine-tuned YOLO on image or video → screening output
+│   ├── FeatureExtraction/
+│   │   └── spine_geometry.py                # Anatomy-aware geometry features + reliability score
 │   └── Evaluation/
-│       ├── run_evaluation.py                # MediaPipe / YOLO pretrained / YOLO fine-tuned test-set eval (--model)
-│       ├── train_yolo_scoliosis.py          # Fine-tune YOLO on scoliosis train/val
+│       ├── run_evaluation.py                # MediaPipe / YOLO pretrained / YOLO fine-tuned test-set eval (--model, --weights, --tag)
+│       ├── train_yolo_scoliosis.py          # Fine-tune YOLO (configurable epochs/imgsz/batch/seed, --augment-profile)
 │       ├── train_yolo_combined.py           # Fine-tune on Roboflow + domain pseudo-labeled data
+│       ├── dataset_eda.py                   # Read-only dataset EDA / data-quality report
+│       ├── dataset_cleaning.py              # Review-first cleaning; exports Data/Processed/scoliosis_cleaned/
+│       ├── split_quality_check.py           # Split sizes, class mix, leakage (incl. near-duplicate photos)
+│       ├── create_grouped_split.py          # Photo-grouped, class-stratified train/valid/test re-split (no training)
+│       ├── create_kfold_splits.py           # OPTIONAL stratified, photo-grouped 3-fold splits (no training)
 │       ├── compare_workflows.py             # 3-way comparison: MediaPipe vs YOLO pre vs fine-tuned
+│       ├── compare_original_vs_cleaned.py   # Compare any two evaluated fine-tuned models
+│       ├── run_original_vs_cleaned_experiment.py  # Print/run the original-vs-cleaned train+eval+compare steps
+│       ├── debug_spine_geometry.py          # Annotated overlays of predicted geometry + reliability
 │       └── temporal_stability.py           # Frame-to-frame measurement variance on real recordings
 ├── legacy/
 │   └── train_baseline_pending_clinical_labels.py  # LR classifier — valid when independent ATR labels arrive
@@ -43,7 +53,11 @@ Kidzonia Project/
 │   └── Processed/                           # Generated CSVs (auto-created, gitignored)
 ├── public_datasets/                         # Source archives only — extracted images are gitignored
 ├── models/                                  # Trained weights (gitignored)
-├── workflow_comparison.ipynb                # Visual 3-way comparison: MediaPipe vs YOLO
+├── docs/
+│   ├── interim_report.md                    # Written project summary (non-diagnostic scope, results, limitations)
+│   └── baseline_workflows_comparison.md     # MediaPipe vs pretrained YOLO vs fine-tuned: grouped-split and old-split records
+├── workflow_comparison.ipynb                # HISTORICAL/DEBUG notebook: old-split results, affected by data leakage (not final)
+├── grouped_workflow_comparison.ipynb        # FINAL results: model retrained + evaluated on the photo-grouped split (leakage-free)
 ├── example_trial_row.json                   # Example row for schema validation
 └── environment.yml                          # Conda environment spec
 ```
@@ -159,18 +173,69 @@ python "src/Data Processing/validate_trial_schema.py"
 
 ---
 
-## Workflow Comparison Experiment
+## Fine-Tuning and Evaluation Workflow
 
-Compares MediaPipe vs YOLO (pretrained) vs YOLO (fine-tuned) on the scoliosis test set.
+The written summary is [`docs/interim_report.md`](docs/interim_report.md); the charts and example images behind it are in [`workflow_comparison.ipynb`](workflow_comparison.ipynb), which is a **historical/debug notebook**: its results are on the old split and affected by data leakage, so they are not final performance claims, and it must not be re-run with grouped-split results. Final results are in [`grouped_workflow_comparison.ipynb`](grouped_workflow_comparison.ipynb) (a model retrained and evaluated on the grouped split). The plan and reasoning for each experiment is in `Data/Processed/evaluation/fine_tuning_plan.md` (generated outputs under `Data/Processed/` are gitignored).
 
 ```bash
-# Run in order:
+# 1. Check the data and the splits (read-only)
+python src/Evaluation/dataset_cleaning.py --dry-run
+python src/Evaluation/split_quality_check.py
+
+# 2. Train (each experiment in its own --project folder). Slow on CPU: ~1 hour each.
+python src/Evaluation/train_yolo_scoliosis.py --data-yaml Data/Processed/scoliosis_cleaned/scoliosis_cleaned.yaml \
+    --project models/yolo_scoliosis_cleaned_aug --augment-profile conservative
+
+# 3. Evaluate on the fixed test set (fast), one tag per model
+python src/Evaluation/run_evaluation.py --model yolo_finetuned \
+    --weights models/yolo_scoliosis_cleaned_aug/run/weights/best.pt --tag cleaned_aug_trained
+
+# 4. Compare two models (old-split results — historical/debug only)
+python src/Evaluation/compare_original_vs_cleaned.py --baseline-csv Data/Processed/comparison/yolo_finetuned_scoliosis_test_cleaned_trained.csv \
+    --candidate-csv Data/Processed/comparison/yolo_finetuned_scoliosis_test_cleaned_aug_trained.csv \
+    --baseline-label "Cleaned" --candidate-label "Cleaned + conservative aug" --out-name cleaned_vs_cleaned_aug
+
+# Re-split with no photo shared between train/valid/test (mixed-label photo groups excluded; prepares data only)
+python src/Evaluation/create_grouped_split.py
+python src/Evaluation/split_quality_check.py --dataset grouped
+
+# Optional: stratified, photo-grouped 3-fold splits (prepares data only; training is up to you)
+python src/Evaluation/create_kfold_splits.py --k 3 --seed 42
+```
+
+`--augment-profile` is `default_yolo` (Ultralytics defaults, the previous behaviour), `conservative` (small shift/scale/tilt only; no flip, mosaic, erasing or colour changes) or `none`. Epochs, image size, batch size, seed, run name and base weights are also command-line options (`--help`).
+
+### Grouped split (leakage-free evaluation)
+
+The original public split puts near-identical copies of the same photo in train, valid and test, so its valid/test numbers are optimistic. `create_grouped_split.py` builds a new split (`Data/Processed/scoliosis_grouped_split/`) where every photo is in exactly one split; mixed-label photo groups are excluded and listed in its `conflict_report.md`.
+
+- **Old-model results are historical/debug only.** Models trained on the old split should not be interpreted as unbiased on the grouped test set. Retrain on the grouped train/valid split before reporting grouped-split performance.
+- `run_evaluation.py` takes `--data-yaml` and `--split` (defaults: the original dataset, `test` — the previous behaviour). Non-default runs write `<workflow>_<dataset>_<split>[_<tag>].csv` plus a `.meta.json` recording the dataset, split and weights; the comparison scripts read it and warn about mixed test sets or old-split models.
+
+```bash
+# 1. Train on the grouped train/valid split (slow on CPU; nothing here runs automatically)
+python src/Evaluation/train_yolo_scoliosis.py --data-yaml Data/Processed/scoliosis_grouped_split/scoliosis_grouped_split.yaml \
+    --project models/yolo_scoliosis_grouped_conservative --augment-profile conservative
+
+# 2. Evaluate on the grouped test split
+python src/Evaluation/run_evaluation.py --model yolo_finetuned \
+    --weights models/yolo_scoliosis_grouped_conservative/run/weights/best.pt \
+    --data-yaml Data/Processed/scoliosis_grouped_split/scoliosis_grouped_split.yaml --split test --tag grouped_conservative
+
+# 3. Compare two grouped-split models (both evaluated with the command above, different --tag)
+python src/Evaluation/compare_original_vs_cleaned.py \
+    --baseline-csv  Data/Processed/comparison/yolo_finetuned_scoliosis_grouped_split_test_grouped_default.csv \
+    --candidate-csv Data/Processed/comparison/yolo_finetuned_scoliosis_grouped_split_test_grouped_conservative.csv \
+    --baseline-label "Grouped default aug" --candidate-label "Grouped conservative aug" --out-name grouped_default_vs_conservative
+```
+
+**Baseline comparison (MediaPipe vs pretrained YOLO vs fine-tuned):**
+
+```bash
 python "src/Evaluation/run_evaluation.py" --model mediapipe
 python "src/Evaluation/run_evaluation.py" --model yolo_pretrained
-python "src/Evaluation/train_yolo_scoliosis.py"
 python "src/Evaluation/run_evaluation.py" --model yolo_finetuned
 python "src/Evaluation/compare_workflows.py"
-jupyter lab workflow_comparison.ipynb
 ```
 
 ---
@@ -222,6 +287,7 @@ jupyter lab workflow_comparison.ipynb
 - **Proxy measurements only**: All angular features are camera-derived proxies, not validated clinical measurements.
 - **2D-only features**: Angular features are image-plane projections. Depth is captured but not fully integrated.
 - **No independent clinical labels yet**: `proxy_screening_flag` cannot be used as a training target until scoliometer/clinical ATR labels are collected.
+- **Public scoliosis dataset quality**: small (183 usable images from about 118 distinct photos), with near-duplicate photos across train/valid/test and a few conflicting labels — see `split_quality_check.py`. Test-set metrics are optimistic until the data is re-split by photo.
 
 ---
 

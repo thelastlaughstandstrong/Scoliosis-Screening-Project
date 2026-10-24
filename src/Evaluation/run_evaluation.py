@@ -1,13 +1,31 @@
 # ============================================================
 # Evaluation Runner — MediaPipe / YOLO (pretrained) / YOLO (fine-tuned)
-# Runs pose estimation on public_datasets/scoliosis/test/ and writes
-# a shared comparison-schema CSV per workflow (for compare_workflows.py).
+# Runs pose estimation on a split of a YOLO dataset and writes a shared
+# comparison-schema CSV per workflow (for compare_workflows.py).
+#
+# Which images are evaluated is chosen with --data-yaml and --split. With no
+# arguments the original public dataset's test split is used (public_datasets/
+# scoliosis/test), exactly as before.
 #
 # Usage:
 #   python run_evaluation.py --model mediapipe
 #   python run_evaluation.py --model yolo_pretrained
 #   python run_evaluation.py --model yolo_finetuned
 #   python run_evaluation.py --model all            (default)
+#   python run_evaluation.py --model yolo_finetuned \
+#       --weights models/yolo_scoliosis_grouped_conservative/run/weights/best.pt \
+#       --data-yaml Data/Processed/scoliosis_grouped_split/scoliosis_grouped_split.yaml \
+#       --split test --tag grouped_conservative
+#
+# WARNING: models trained on the old split should not be interpreted as unbiased on the
+# grouped test set — the old train split contains photos the grouped split puts in test.
+# Retrain on the grouped train/valid split before reporting grouped-split performance.
+# Results of old-split models are historical/debug only once the grouped split exists.
+#
+# Output CSV name (kept backward compatible):
+#   default dataset + test split -> <workflow>_scoliosis_test[_<tag>].csv        (unchanged)
+#   any other dataset/split      -> <workflow>_<dataset>_<split>[_<tag>].csv
+# plus a <csv>.meta.json sidecar recording the dataset, split and weights used.
 #
 # Run order for the full comparison:
 #   1. run_evaluation.py --model mediapipe
@@ -31,8 +49,6 @@ import cv2
 import numpy as np
 
 PROJECT_ROOT       = Path(__file__).resolve().parents[2]
-TEST_IMAGES        = PROJECT_ROOT / "public_datasets" / "scoliosis" / "test" / "images"
-TEST_LABELS        = PROJECT_ROOT / "public_datasets" / "scoliosis" / "test" / "labels"
 COMPARISON_DIR      = PROJECT_ROOT / "Data" / "Processed" / "comparison"
 FINETUNED_WEIGHTS   = PROJECT_ROOT / "models" / "yolo_scoliosis" / "run" / "weights" / "best.pt"
 
@@ -41,6 +57,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.config.keypoint_schema import SPINE_BASE_LUMBAR, SPINE_TOP_CERVICAL, SPINE_POINT_IDXS
 from src.FeatureExtraction.spine_geometry import extract_spine_geometry, empty_spine_geometry
+from src.Evaluation.dataset_paths import (
+    resolve_split, write_meta, trained_on_yaml, same_path, rel, LEGACY_DATASET_NAMES, OLD_SPLIT_WARNING,
+)
 
 CLASS_NAMES = {0: "normal", 1: "scoliosis"}
 VISIBILITY_THRESHOLD = 0.5
@@ -178,14 +197,15 @@ SPINE_TOP_IDX    = SPINE_TOP_CERVICAL
 SPINE_KEY_IDX    = SPINE_POINT_IDXS   # spine points only, used for quality metrics
 
 
-def yolo_finetuned_setup():
-    if not FINETUNED_WEIGHTS.exists():
+def yolo_finetuned_setup(weights_path=None):
+    weights_path = Path(weights_path) if weights_path else FINETUNED_WEIGHTS
+    if not weights_path.exists():
         raise FileNotFoundError(
-            f"Fine-tuned weights not found at: {FINETUNED_WEIGHTS}\n"
+            f"Fine-tuned weights not found at: {weights_path}\n"
             "        Run train_yolo_scoliosis.py first."
         )
     from ultralytics import YOLO
-    return YOLO(str(FINETUNED_WEIGHTS))
+    return YOLO(str(weights_path))
 
 
 def spine_angle_deg(kps):
@@ -243,50 +263,126 @@ def yolo_finetuned_process(model, img, gt_id):
 # Registry + shared runner
 # ---------------------------------------------------------------
 
+# "output_csv" is the legacy name used for the default dataset + test split (kept so every older
+# command and file still lines up); "prefix" is used to build the name for any other dataset/split.
 WORKFLOWS = {
     "mediapipe": {
         "workflow_type": "mediapipe",
         "setup":         mediapipe_setup,
         "process":       mediapipe_process,
         "output_csv":    COMPARISON_DIR / "mediapipe_scoliosis_test.csv",
+        "prefix":        "mediapipe",
     },
     "yolo_pretrained": {
         "workflow_type": "yolo_pretrained",
         "setup":         yolo_pretrained_setup,
         "process":       yolo_pretrained_process,
         "output_csv":    COMPARISON_DIR / "yolo_scoliosis_test.csv",
+        "prefix":        "yolo_pretrained",
     },
     "yolo_finetuned": {
         "workflow_type": "yolo_finetuned",
         "setup":         yolo_finetuned_setup,
         "process":       yolo_finetuned_process,
         "output_csv":    COMPARISON_DIR / "yolo_finetuned_scoliosis_test.csv",
+        "prefix":        "yolo_finetuned",
     },
 }
 
 
-def run(model_key: str):
-    wf = WORKFLOWS[model_key]
-    output_csv = wf["output_csv"]
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
+def output_csv_path(wf: dict, source: dict, tag: str = None) -> Path:
+    """Results CSV path. Default dataset + test split keeps the legacy name; anything else embeds
+    the dataset and split so a grouped-split run can never overwrite an old-split result."""
+    if source["is_legacy_default"]:
+        path = wf["output_csv"]
+    else:
+        path = COMPARISON_DIR / f"{wf['prefix']}_{source['dataset_name']}_{source['split']}.csv"
+    if tag:
+        path = path.with_name(f"{path.stem}_{tag}{path.suffix}")
+    return path
 
-    image_files = sorted(list(TEST_IMAGES.glob("*.jpg")) + list(TEST_IMAGES.glob("*.png")))
-    if not image_files:
-        print(f"[ERROR] No images found in {TEST_IMAGES}")
+
+def check_training_provenance(model, source: dict, weights) -> dict:
+    """Compare the dataset a fine-tuned model was trained on with the one it is evaluated on,
+    and warn when evaluating on a grouped/new split a model could have seen part of during training."""
+    trained_on = trained_on_yaml(model)
+    info = {"trained_on_data_yaml": rel(trained_on), "trained_on_matches_eval": None, "old_split_warning": False}
+    if trained_on is None:
+        print("[INFO] Could not read the training dataset from the weights; cannot check for train/test overlap.")
+        return info
+    info["trained_on_matches_eval"] = same_path(trained_on, source["yaml_path"])
+    if info["trained_on_matches_eval"]:
+        return info
+    print(f"[INFO] Model was trained on : {rel(trained_on)}")
+    print(f"       Evaluating on        : {rel(source['yaml_path'])} ({source['split']})")
+    eval_is_legacy = source["dataset_name"] in LEGACY_DATASET_NAMES
+    trained_is_legacy = trained_on.parent.name in LEGACY_DATASET_NAMES
+    if trained_is_legacy and not eval_is_legacy:
+        info["old_split_warning"] = True
+        print(f"[WARN] {OLD_SPLIT_WARNING}")
+    elif eval_is_legacy and not trained_is_legacy:
+        info["old_split_warning"] = True
+        print("[WARN] This model was trained on a grouped/new split but is being evaluated on the OLD test folder, "
+              "which shares photos with the grouped train split. Evaluate it on its own grouped test split instead.")
+    return info
+
+
+def run(model_key: str, weights: str = None, tag: str = None, data_yaml=None, split: str = "test"):
+    """
+    Args:
+        weights: only used for model_key == "yolo_finetuned" — overrides
+            FINETUNED_WEIGHTS so you can evaluate a model trained on a
+            different dataset (e.g. Data/Processed/scoliosis_cleaned) without
+            touching the default weights path.
+        tag: suffix appended to the output CSV filename so an alternate-weights
+            run doesn't overwrite the default run's results. If --weights is
+            given without --tag, the weights' parent model directory name is
+            used automatically (e.g. "yolo_scoliosis_cleaned").
+        data_yaml / split: which YOLO dataset and split to evaluate (default: the original
+            public dataset's test split, i.e. the previous behaviour).
+    """
+    if weights and model_key != "yolo_finetuned":
+        print(f"[WARN] --weights is only used by --model yolo_finetuned; ignoring for {model_key}.")
+        weights = None
+    if weights and not tag:
+        tag = Path(weights).resolve().parents[2].name   # .../<model_dir>/run/weights/best.pt
+
+    try:
+        source = resolve_split(data_yaml, split)
+    except (FileNotFoundError, KeyError, ValueError) as e:
+        print(f"[ERROR] {e}")
         return
 
-    print(f"\n[INFO] Running workflow: {model_key}")
+    wf = WORKFLOWS[model_key]
+    output_csv = output_csv_path(wf, source, tag)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    images_dir, labels_dir = source["images_dir"], source["labels_dir"]
+    image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
+    if not image_files:
+        print(f"[ERROR] No images found in {images_dir}")
+        return
+    if labels_dir is None:
+        print(f"[WARN] No labels folder next to {images_dir} — ground truth will be missing.")
+
+    print(f"\n[INFO] Running workflow: {model_key}" + (f"  (weights={weights})" if weights else ""))
+    print(f"[INFO] Evaluating on: {rel(source['yaml_path'])}  split={split}  ({len(image_files)} images)")
+    if source["split"] == "train":
+        print("[WARN] Evaluating on the TRAIN split — a fine-tuned model has seen these images; results are not a test.")
     try:
-        model = wf["setup"]()
+        model = wf["setup"](weights) if model_key == "yolo_finetuned" else wf["setup"]()
     except FileNotFoundError as e:
         print(f"[ERROR] {e}")
         return
 
+    provenance = (check_training_provenance(model, source, weights) if model_key == "yolo_finetuned"
+                  else {"trained_on_data_yaml": None, "trained_on_matches_eval": None, "old_split_warning": False})
+
     rows = []
     try:
         for img_path in image_files:
-            label_path = TEST_LABELS / (img_path.stem + ".txt")
-            gt_id, gt_class = load_ground_truth(label_path) if label_path.exists() else (None, None)
+            label_path = (labels_dir / (img_path.stem + ".txt")) if labels_dir else None
+            gt_id, gt_class = load_ground_truth(label_path) if label_path and label_path.exists() else (None, None)
 
             img = imdecode_unicode(img_path)
             if img is None:
@@ -319,7 +415,15 @@ def run(model_key: str):
         writer.writeheader()
         writer.writerows(rows)
 
-    print_summary(rows, output_csv)
+    write_meta(
+        output_csv,
+        model=model_key, tag=tag,
+        weights=rel(Path(weights)) if weights else None,
+        eval_data_yaml=rel(source["yaml_path"]), eval_dataset=source["dataset_name"],
+        eval_split=source["split"], n_images=len(rows),
+        **provenance,
+    )
+    print_summary(rows, output_csv, split)
 
 
 def print_row_status(row, img_name, gt_class):
@@ -341,7 +445,7 @@ def print_row_status(row, img_name, gt_class):
     )
 
 
-def print_summary(rows, output_csv):
+def print_summary(rows, output_csv, split="test"):
     total    = len(rows)
     valid    = sum(r["valid_measurement"] for r in rows)
     n_normal = [r for r in rows if r["ground_truth_class"] == "normal"]
@@ -362,7 +466,7 @@ def print_summary(rows, output_csv):
         print(f"  Overall accuracy  : {cls_acc:.0%}  ({sum(r['classification_correct'] for r in cls_rows if r['classification_correct'])}/{len(cls_rows)})")
         print(f"  Scoliosis recall  : {len(scoli_detected)}/{len(n_scoli)} correctly predicted as scoliosis")
 
-    print(f"\n  NOTE: Only {len(n_scoli)} scoliosis cases in test set.")
+    print(f"\n  NOTE: Only {len(n_scoli)} scoliosis cases in the {split} set.")
     print(f"  Use per-class recall, not accuracy, to evaluate screening reliability.")
     print(f"\n  Output saved to: {output_csv.name} (in Data/Processed/comparison/)")
     print(f"{'='*60}")
@@ -374,7 +478,26 @@ if __name__ == "__main__":
         "--model", choices=[*WORKFLOWS.keys(), "all"], default="all",
         help="Which workflow to evaluate (default: all)",
     )
+    parser.add_argument(
+        "--weights", default=None,
+        help="Fine-tuned YOLO weights to use instead of the default (only applies to "
+             "--model yolo_finetuned) — e.g. models/yolo_scoliosis_cleaned/run/weights/best.pt",
+    )
+    parser.add_argument(
+        "--tag", default=None,
+        help="Suffix for the output CSV filename, so an alternate --weights run doesn't "
+             "overwrite the default results (auto-derived from --weights if omitted).",
+    )
+    parser.add_argument(
+        "--data-yaml", default=None,
+        help="YOLO data yaml of the dataset to evaluate on (default: the original public dataset, "
+             "public_datasets/scoliosis/data.yaml). e.g. Data/Processed/scoliosis_grouped_split/scoliosis_grouped_split.yaml",
+    )
+    parser.add_argument(
+        "--split", default="test", choices=["train", "valid", "val", "test"],
+        help="Which split of --data-yaml to evaluate (default: test).",
+    )
     args = parser.parse_args()
 
     for key in (WORKFLOWS.keys() if args.model == "all" else [args.model]):
-        run(key)
+        run(key, weights=args.weights, tag=args.tag, data_yaml=args.data_yaml, split=args.split)

@@ -8,6 +8,7 @@ dependencies:
 
   # Core scientific stack (conda binaries = fewer install failures)
   - numpy>=1.26,<2.0
+  - libblas=*=*openblas  # pin OpenBLAS: numpy 1.26 crashes (0xC06D007F) against MKL 2025.x
   - scipy>=1.11,<1.14
   - pandas>=2.1,<2.3
   - scikit-learn>=1.4
